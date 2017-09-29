@@ -6,44 +6,92 @@
  *
  * License:
  *        MIT License. All code unless otherwise specified is
- *        Copyright (c) Matthew Knox and Contributors 2016.
+ *        Copyright (c) Matthew Knox and Contributors 2017.
  */
+
 'use strict';
 
-module.exports = (rootPath) => {
-    const path = require('path');
+module.exports = (rootPath, direct) => {
+    if (global.__rootPath) {
+        throw new Error('There can be only one instance per process.');
+    }
+
+    // util.promisify fallback (needed for node < v8.0.0)
+    const util = require('util');
+    if (!util.promisify) {
+        const customPromise = Symbol('util.promisify.custom');
+        util.promisify = orig => {
+            if (typeof(orig) !== 'function') {
+                const err = TypeError('The "original" argument must be of type function');
+                err.code = 'ERR_INVALID_ARG_TYPE';
+                err.name = `TypeError [${err.code}]`;
+                throw err;
+            }
+
+            let fn = orig[customPromise];
+            if (fn) {
+                if (typeof(fn) !== 'function') {
+                    throw new TypeError('The [util.promisify.custom] property must be a function');
+                }
+            }
+            else {
+                fn = function () {
+                    const temp = Array.from(arguments);
+                    return new Promise((resolve, reject) => {
+                        try {
+                            orig.apply(this, temp.concat(function () {
+                                const values = Array.from(arguments),
+                                    err = values.splice(0, 1)[0];
+                                return err ? reject(err) : resolve(values[0]);
+                            }));
+                        }
+                        catch (err) {
+                            reject(err);
+                        }
+                    });
+                };
+                Object.setPrototypeOf(fn, Object.getPrototypeOf(orig));
+                Object.defineProperties(fn, Object.getOwnPropertyDescriptors(orig));
+                orig[customPromise] = fn;
+            }
+            fn[customPromise] = fn;
+            return fn;
+        };
+        util.promisify.custom = customPromise;
+    }
+
+    const path = require('path'),
+        cwd = process.cwd();
     // Arbitary location module loading requirements
     global.__rootPath = rootPath;
-    global.rootPathJoin = function() {
-        return path.join.apply(this, [global.__rootPath].concat(Array.from(arguments)));
+    global.__runAsLocal = rootPath === cwd;
+    global.__runAsRequired = !direct;
+    global.rootPathJoin = function () {
+        const args = Array.from(arguments);
+        const root = !global.__runAsLocal && args[0].startsWith('modules') ? cwd : global.__rootPath;
+        return path.join.apply(this, [root].concat(args));
     };
-    global.__modulesPath = global.rootPathJoin('modules/');
-    global.moduleNameFromPath = (p) => {
-        if (!p.startsWith(global.__modulesPath)) {
+    global.__modulesPath = global.__runAsLocal ? global.rootPathJoin('modules/') : cwd;
+    global.moduleNameFromPath = p => {
+        if (!p || !p.startsWith(global.__modulesPath)) {
             return null;
         }
-        const trimmed = p.substr(global.__modulesPath.length);
+        const add = global.__modulesPath.endsWith(path.sep) ? 0 : 1;
+        const trimmed = p.substr(global.__modulesPath.length + add);
         let index = trimmed.indexOf(path.sep);
         if (index < 0) {
             index = trimmed.length;
         }
-        return trimmed.substr(0, index);
+        const res = trimmed.substr(0, index);
+        if (res === 'node_modules') {
+            return null;
+        }
+        return res;
     };
-
-    // Platform status flags
-    global.StatusFlag = {
-        NotStarted: Symbol('NotStarted'),
-        Unknown: Symbol('Unknown'),
-        Started: Symbol('Started'),
-        Shutdown: Symbol('Shutdown'),
-        ShutdownShouldRestart: Symbol('ShutdownShouldRestart')
-    };
-
 
     // babel and coffee-script setup
-    global.requireHook = require(global.rootPathJoin('core/unsafe/require.js'));
     const babylon = require('babylon'),
-        requireInjectionStr = 'require=global.requireHook(require,__dirname,__filename);';
+        requireInjectionStr = 'require = global.requireHook ? global.requireHook(require, __dirname, __filename) : require;';
     require('babel-register')({
         plugins: [{
             visitor: {
@@ -52,7 +100,15 @@ module.exports = (rootPath) => {
                     path.unshiftContainer('body', babylon.parse(requireInjectionStr).program.body[0]);
                 }
             }
-        }]});
+        }],
+        ignore: filename => {
+            let file = path.resolve(filename);
+            if (file.startsWith(global.__rootPath)) {
+                file = file.substr(global.__rootPath.length);
+            }
+            return file.split(path.sep).indexOf('node_modules') >= 0;
+        }
+    });
     require('babel-polyfill');
     const cs = require('coffee-script');
     cs.register();
@@ -62,6 +118,7 @@ module.exports = (rootPath) => {
         const res = origcs.apply(this, arguments);
         return requireInjectionStr + res;
     };
+    global.requireHook = require(global.rootPathJoin('core/unsafe/require.js'));
 
     // Prototypes
     String.prototype.toProperCase = function () {
@@ -76,8 +133,8 @@ module.exports = (rootPath) => {
         return this.length >= 2 ? this[0].toUpperCase() + this.substring(1) : this;
     };
 
-    // console modifications
-    require(rootPathJoin('core/unsafe/console.js'));
+    // logging modifications
+    require(rootPathJoin('core/unsafe/logging.js'));
 
     // Raw stack traces
     if (!Error.prepareStackTrace) {

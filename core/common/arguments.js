@@ -1,64 +1,13 @@
-const consolec = require(global.rootPathJoin('core/unsafe/console.js'));
-exports.conciergeArguments = [
-    {
-        long: '--debug',
-        short: '-d',
-        description: 'Enables debug level logging.',
-        run: (out) => {
-            out.log('Debug mode enabled.'.yellow);
-            consolec.setDebug(true);
-        }
-    },
-    {
-        long: '--log',
-        short: '-l',
-        description: 'Saves logs to a local file.',
-        run: (out) => {
-            out.log('Logging mode enabled.'.yellow);
-            consolec.setLog(true);
-        }
-    },
-    {
-        long: '--timestamp',
-        short: '-t',
-        description: 'Adds a timestamp to each output log message.',
-        run: (out) => {
-            out.log('Console timestamps enabled.'.yellow);
-            consolec.setTimestamp(true);
-        }
-    },
-    {
-        long: '--language',
-        short: '-i',
-        description: 'Sets the locale that should be used by the bot.',
-        expects: ['LOCALE'],
-        run: (out, value) => {
-            out.log(`Locale set to "${value[0]}".`.yellow);
-            global.__i18nLocale = value[0];
-        }
-    },
-    {
-        long: '--moduledir',
-        short: '-m',
-        description: 'Sets the search path for modules used by the bot.',
-        expects: ['DIRECTORY'],
-        run: (out, value) => {
-            let path = require('path');
-            global.__modulesPath = path.resolve(value[0]);
-            out.log(`Modules directory set to "${value}".`.yellow);
-        }
-    },
-    {
-        long: '--configserv',
-        short: '-c',
-        description: 'Overrides the builtin configuration service with another.',
-        expects: ['FILE'],
-        run: (out, value) => {
-            global.__configService = value[0];
-            out.log('Configuration service overridden.'.yellow);
-        }
-    }
-];
+/**
+ * A generic, multipurpose CLI arguments parser.
+ *
+ * Written By:
+ *              Matthew Knox
+ *
+ * License:
+ *              MIT License. All code unless otherwise specified is
+ *              Copyright (c) Matthew Knox and Contributors 2017.
+ */
 
 class OutputBuffer {
     constructor(consoleOutput) {
@@ -74,9 +23,9 @@ class OutputBuffer {
     log(data) {
         this.write(data + '\n');
     }
-    clear() {
+    clear(clearConsole) {
         this.output = '';
-        if (this.consoleOutput) {
+        if (this.consoleOutput && clearConsole) {
             process.stdout.write('\u001b[2J\u001b[0;0H');
         }
     }
@@ -97,26 +46,31 @@ const verifyUnique = (options) => {
 
 const generateHelp = (options, config) => {
     const colourise = (str, col) => {
-        return config.colours ? str[col] : str;
+        return config.colours ? str[col].bold.reset : str;
     };
     options.push({
         long: '--help',
         short: '-h',
         description: 'Shows this help.',
-        run: (out) => {
-            let result = 'USAGE\n\t' + colourise(config.string, 'red') + ' ' + colourise('<options...>', 'cyan') + '\nOPTIONS\n';
+        run: out => {
+            const outOptions = ['OPTIONS'];
             for (let i = 0; i < options.length; i++) {
-                let infoStr = '\t' + colourise(options[i].short + ', ' + options[i].long, 'cyan');
+                outOptions.push(colourise(options[i].short + ', ' + options[i].long, 'cyan'));
                 if (options[i].expects) {
-                    infoStr += ' ';
-                    for (let j = 0; j < options[i].expects.length; j++) {
-                        infoStr += '{' + colourise(options[i].expects[j], 'yellow') + '} ';
-                    }
+                    outOptions[outOptions.length - 1] += ' ' + options[i].expects.map(e => `{${colourise(e, 'yellow')}} `);
                 }
-                result += infoStr + '\n\t\t' + options[i].description + '\n';
+                outOptions.push('\t' + options[i].description);
             }
-            out.clear();
-            out.log(result);
+            const sections = [
+                ['USAGE', colourise(config.string, 'red') + ' ' + colourise('[<options...>]', 'cyan')],
+                outOptions
+            ];
+            for (let section of config.sections || []) {
+                const ind = section.splice(0, 1);
+                sections.splice(ind, 0, section);
+            }
+            out.clear(config.clearConsole);
+            out.log(sections.map(s => s.join('\n\t')).join('\n\n'));
             return true;
         }
     });
@@ -137,8 +91,9 @@ const generateHelp = (options, config) => {
  * {
  *    long: '--example',
  *    short: '-e',
- *    description: 'An example option that calls a function with its associated argument "FILE"',
- *    expects: ['FILE'],
+ *    description: 'An example option that calls a function with its associated arguments "FILE" and "FOLDER"',
+ *    expects: ['FILE', 'FOLDER'],
+ *    defaults: ['default_folder'],
  *    run: (out, vals) => {
  *        // vals[0] === file
  *    }
@@ -153,7 +108,7 @@ const generateHelp = (options, config) => {
  * }
  * ```
  */
-exports.parseArguments = (args, options, help = {enabled:false, string:null, colours:true}, consoleOutput = false, ignoreError = false) => {
+exports.parseArguments = (args, options, help = {enabled:false, string:null, colours:true, clearConsole:false, sections:[]}, consoleOutput = false, ignoreError = false) => {
     if (help && help.enabled) {
         generateHelp(options, help);
     }
@@ -167,7 +122,7 @@ exports.parseArguments = (args, options, help = {enabled:false, string:null, col
     };
     for (let i = 0; i < args.length; i++) {
         const arg = args[i],
-            pargs = options.filter((value) => { return value.short === arg || value.long === arg; });
+            pargs = options.filter(value => value.short === arg || value.long === arg);
         if (pargs.length === 0) {
             continue;
         }
@@ -175,25 +130,47 @@ exports.parseArguments = (args, options, help = {enabled:false, string:null, col
             throw new Error('Invalid Arguments');
         }
 
-        const vals = [],
-            count = (pargs[0].expects || {}).length || 0;
+        let count = (pargs[0].expects || []).length;
+        const def = (pargs[0].defaults || []).length;
+        const vals = Array(count - def).concat(pargs[0].defaults || []);
         for (let j = 1; j <= count; j++) {
-            if (args[i + j]) {
-                vals.push(args[i + j]);
+            const nexta = args[i + j];
+            if (nexta && !options.some(value => value.short === nexta || value.long === nexta)) {
+                vals[j - 1] = args[i + j];
             }
-            else if (!ignoreError) {
+            else if (!vals.includes(void(0)) || ignoreError) {
+                count = j - 1;
+                break;
+            }
+            else {
                 throw new Error(`Too few arguments given to "${arg}"`);
             }
         }
-        const diff = 1 + count;
-        args.splice(i, diff);
-        i -= diff;
         const out = new OutputBuffer(consoleOutput),
-            res = pargs[0].run ? pargs[0].run(out, vals) : false,
             p = {
                 vals: vals,
-                out: out.toString()
+                out: null
             };
+        let res;
+        try {
+            res = pargs[0].run ? pargs[0].run(out, vals) : false;
+            p.out = out.toString();
+        }
+        catch (e) {
+            // if there is a default, execute that instead
+            if (pargs[0].defaults && pargs[0].run) {
+                for (let j = pargs[0].defaults.length - 1, k = vals.length - 1; j >= 0; j--, k--) {
+                    vals[k] = pargs[0].defaults[j];
+                    count--;
+                }
+                out.clear();
+                res = pargs[0].run(out, vals);
+                p.out = out.toString();
+            }
+            else {
+                throw e;
+            }
+        }
         if (parsed.parsed[pargs[0].short]) {
             let next = parsed.parsed[pargs[0].short];
             while (next.next) {
@@ -204,6 +181,10 @@ exports.parseArguments = (args, options, help = {enabled:false, string:null, col
         else {
             parsed.parsed[pargs[0].short] = p;
         }
+
+        const diff = 1 + count;
+        args.splice(i, diff);
+        i -= diff;
 
         if (res) {
             break;

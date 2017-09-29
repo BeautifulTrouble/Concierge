@@ -7,29 +7,42 @@
 *
 * License:
 *        MIT License. All code unless otherwise specified is
-*        Copyright (c) Matthew Knox and Contributors 2015.
+*        Copyright (c) Matthew Knox and Contributors 2017.
 */
 
 const figlet = require('figlet'),
-    MiddlewareHandler = require('./middleware.js');
+    path = require('path'),
+    util = require('util'),
+    ModulesLoader = require(global.rootPathJoin('core/modules/modules.js')),
+    ConfigurationService = require(global.rootPathJoin('core/modules/config.js')),
+    LoopbackBuilder = require(global.rootPathJoin('core/modules/loopback.js')),
+    PackageInfo = require(global.rootPathJoin('package.json')),
+    MiddlewareHandler = require('concierge/middleware'),
+    git = require('concierge/git');
 
 class Platform extends MiddlewareHandler {
-    constructor() {
+    constructor () {
         super();
+        this.packageInfo = PackageInfo;
+        this.config = new ConfigurationService();
+        this.modulesLoader = new ModulesLoader(this);
         this.defaultPrefix = '/';
-        this.packageInfo = require(global.rootPathJoin('package.json'));
-        this.modulesLoader = new (require(global.rootPathJoin('core/modules/modules.js')))(this);
-        this.statusFlag = global.StatusFlag.NotStarted;
         this.onShutdown = null;
         this.waitingTime = 250;
+        this.statusFlag = global.StatusFlag.NotStarted;
         this.packageInfo.name = this.packageInfo.name.toProperCase();
-        global.shim = require(global.rootPathJoin('core/modules/shim.js'));
-        global.shim.current = this;
-        this._boundErrorHandler = (err) => {
-            global.shim.current._errorHandler.call(global.shim.current, err);
-        };
+        this.onMessage = this.onMessage.bind(this);
+        this._boundErrorHandler = this._errorHandler.bind(this);
         process.on('uncaughtException', this._boundErrorHandler);
         process.on('unhandledRejection', this._boundErrorHandler);
+        this.modulesLoader.once('loadNone', this._firstRun.bind(this));
+        this.modulesLoader.on('loadSystem', this._loadSystemConfig.bind(this));
+    }
+
+    async _firstRun () {
+        const firstRunDir = path.join(global.__modulesPath, 'first-run');
+        await git.clone(process.env.CONCIERGE_DEFAULTS_REPO || 'https://github.com/concierge/first-run.git', firstRunDir);
+        this.modulesLoader.loadModule(await this.modulesLoader.verifyModule(firstRunDir));
     }
 
     _errorHandler (err, api, event) {
@@ -58,7 +71,8 @@ class Platform extends MiddlewareHandler {
             args[0].sendTyping(args[1].thread_id);
         }, this.waitingTime);
         try {
-            returnVal = module.run.apply(this, args);
+            returnVal = this.runMiddlewareSync.apply(this,
+                ['run', module.run.bind(module)].concat(args));
         }
         catch (e) {
             this._errorHandler(e, args[0], args[1]);
@@ -70,26 +84,27 @@ class Platform extends MiddlewareHandler {
         return returnVal;
     }
 
-    _handleMessage(api, event) {
+    _handleMessage (api, event) {
         const matchArgs = [event, api.commandPrefix],
             runArgs = [api, event],
             loadedModules = this.modulesLoader.getLoadedModules('module');
 
         event.module_match_count = 0;
-        for (let i = 0; i < loadedModules.length; i++) {
+        for (let lm of loadedModules) {
             let matchResult;
             try {
-                matchResult = loadedModules[i].match.apply(loadedModules[i], matchArgs);
+                matchResult = this.runMiddlewareSync.apply(this,
+                    ['match', lm.match.bind(lm)].concat(matchArgs, lm.__descriptor));
             }
             catch (e) {
-                console.error($$`BrokenModule ${loadedModules[i].name}`);
+                console.error($$`BrokenModule ${lm.__descriptor.name}`);
                 console.critical(e);
                 continue;
             }
 
             if (matchResult) {
                 event.module_match_count++;
-                const transactionRes = this._handleTransaction(loadedModules[i], runArgs);
+                const transactionRes = this._handleTransaction(lm, runArgs);
                 if (event.shouldAbort || transactionRes) {
                     return;
                 }
@@ -98,128 +113,98 @@ class Platform extends MiddlewareHandler {
         this.emitAsync('message', api, event);
     }
 
-    onMessage(api, event) {
-        this.runMiddleware('before', this._handleMessage, api, event);
+    /**
+     * Callback for integrations, for passing messages to integrations.
+     * @param {Object} api the api that raised the message.
+     * @param {Object} event the event that occured.
+     */
+    onMessage (api, event) {
+        const loopBack = LoopbackBuilder.getLoopbackApi(this, api, event);
+        this.runMiddleware('before', this._handleMessage, loopBack.api, loopBack.event);
     }
 
+    /**
+     * Gets all of the started integration APIs as a key-value pair object.
+     * @return {Object} a key-value pair object of integrations.
+     */
     getIntegrationApis () {
         const integs = this.modulesLoader.getLoadedModules('integration'),
             apis = {};
-        for (let i of integs) {
-            if (i.__running) {
-                apis[i.__descriptor.name] = i.getApi();
-            }
+        for (let integ of integs.filter(i => !!i.__running)) {
+            apis[integ.__descriptor.name] = integ.getApi();
         }
         return apis;
     }
 
-    _firstRun () {
-        const git = require('concierge/git'),
-            path = require('path');
-        let defaultModules;
-        try {
-            defaultModules = require('../defaults.json');
-        }
-        catch (e) {
-            defaultModules = [
-                ['https://github.com/concierge/creator.git', 'creator'],
-                ['https://github.com/concierge/help.git', 'help'],
-                ['https://github.com/concierge/kpm.git', 'kpm'],
-                ['https://github.com/concierge/ping.git', 'ping'],
-                ['https://github.com/concierge/restart.git', 'restart'],
-                ['https://github.com/concierge/shutdown.git', 'shutdown'],
-                ['https://github.com/concierge/update.git', 'update'],
-                ['https://github.com/concierge/test.git', 'test']
-            ];
-        }
-
-        for (let i = 0; i < defaultModules.length; i++) {
-            console.warn($$`Attempting to install module from "${defaultModules[i][0]}"`);
-            git.clone(defaultModules[i][0], path.join(global.__modulesPath, defaultModules[i][1]), (err) => {
-                if (err) {
-                    console.critical(err);
-                    console.error($$`Failed to install module from "${defaultModules[i][0]}"`);
-                }
-                else {
-                    console.warn($$`"${defaultModules[i][1]}" (${'core_' + this.packageInfo.version}) is now installed.`);
-                }
-            });
-        }
+    /**
+     * Gets a loaded module by name or filter function.
+     * @param {string|function()} arg either the name or a filter function to find the module.
+     * @return {Object} the module (if found), array-like otherwise.
+     * @emits Platform#started
+     */
+    getModule (arg) {
+        return this.modulesLoader.getModule(arg);
     }
 
-    start(integrations) {
+    async _loadSystemConfig () {
+        LOG.warn($$`LoadingSystemConfig`);
+        $$.setLocale((await this.config.getSystemConfig('i18n')).locale);
+    }
+
+    /**
+     * Start Concierge, load modules and start integrations.
+     * @param {Array<string>} integrations list of integrations to start.
+     * @param {Array<string>} modules optional list of modules to load.
+     * @emits Platform#started
+     */
+    async start (integrations, modules) {
         if (this.statusFlag !== global.StatusFlag.NotStarted) {
             throw new Error($$`StartError`);
         }
 
-        console.title(figlet.textSync(this.packageInfo.name.toProperCase()));
-        console.title(` ${this.packageInfo.version}`);
-        console.info('------------------------------------');
-        console.warn($$`StartingSystem`);
+        LOG.title($$`Title ${figlet.textSync(this.packageInfo.name.toProperCase())} ${this.packageInfo.version}`);
+        LOG.warn($$`StartingSystem`);
 
-        // Load system config
-        console.warn($$`LoadingSystemConfig`);
-        this.modulesLoader.loadModule({
-            name: 'Configuration',
-            version: 1.0,
-            type: ['service'],
-            startup: global.__configService || global.rootPathJoin('core/modules/config.js'),
-            __loaderUID: 0
-        });
-        this.config = this.modulesLoader.getLoadedModules('service')[0].configuration;
+        LOG.warn($$`LoadingModules`);
+        const loadAll = util.promisify(c => this.modulesLoader.once('loadAll', c))();
+        this.modulesLoader.loadAllModules(modules);
+        await loadAll; // first-run means we cannot await loadAllModules
 
-        $$.setLocale(this.config.getSystemConfig('i18n').locale);
-        const firstRun = this.config.getSystemConfig('firstRun');
-        if (!firstRun.hasRun) {
-            firstRun.hasRun = true;
-            this._firstRun();
-        }
-        this.allowLoopback = !!this.config.getSystemConfig('loopback').enabled;
-
-        // Load modules
-        console.warn($$`LoadingModules`);
-        this.modulesLoader.loadAllModules(this);
-
-        console.warn($$`StartingIntegrations`);
-        for (let integration of integrations) {
-            try {
-                console.info($$`Loading integration '${integration}'...\t`);
-                this.modulesLoader.startIntegration(this.onMessage.bind(this), integration);
-            }
-            catch (e) {
-                if (e.message === 'Cannot find integration to start') {
-                    console.error(`Unknown integration '${integration}'`);
-                }
-                else {
-                    console.error($$`Failed to start output integration '${integration}'.`);
-                    console.critical(e);
-                }
-            }
-        }
+        LOG.warn($$`StartingIntegrations`);
+        await Promise.all(integrations.map(integration => this.modulesLoader.startIntegration(integration)));
 
         this.statusFlag = global.StatusFlag.Started;
-        console.warn($$`SystemStarted` + ' ' + $$`HelloWorld`.rainbow);
+        LOG.warn($$`SystemStarted` + ' ' + $$`HelloWorld`.rainbow);
+        this.heartBeat = setInterval(() => console.debug('Core Heartbeat'), 2147483647);
+        this.emitAsync('started');
     }
 
-    shutdown(flag) {
+    /**
+     * Shutdown Concierge.
+     * @param {Symbol(string)} flag shutdown status. Defaults to `global.StatusFlag.Shutdown`.
+     * @emits Platform#preshutdown
+     * @emits Platform#shutdown
+     * @see `global.StatusFlag`
+     */
+    async shutdown (flag) {
         if (this.statusFlag !== global.StatusFlag.Started) {
             throw new Error($$`ShutdownError`);
         }
 
         this.emit('preshutdown');
-        if (!flag) {
-            flag = global.StatusFlag.Unknown;
-        }
 
         // Unload user modules
-        this.modulesLoader.unloadAllModules();
-        this.statusFlag = flag ? flag : global.StatusFlag.Shutdown;
+        await this.config.saveConfig();
+        await this.modulesLoader.unloadAllModules();
+        this.statusFlag = flag || global.StatusFlag.Shutdown;
 
         process.removeListener('uncaughtException', this._boundErrorHandler);
         process.removeListener('unhandledRejection', this._boundErrorHandler);
         console.warn($$`${this.packageInfo.name} Shutdown`);
+        clearInterval(this.heartBeat);
         this.emit('shutdown', this.statusFlag);
+        this.removeAllListeners();
     }
-};
+}
 
 module.exports = Platform;

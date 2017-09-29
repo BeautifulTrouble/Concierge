@@ -12,60 +12,89 @@
  *
  * License:
  *        MIT License. All code unless otherwise specified is
- *        Copyright (c) Matthew Knox and Contributors 2016.
+ *        Copyright (c) Matthew Knox and Contributors 2017.
  */
 
-const translationsReq = rootPathJoin('core/translations/translations.js'),
-    platformReq = rootPathJoin('core/platform.js');
+'use strict';
 
-let platform = null,
-    startArgs = null;
+const fork = require('child_process').fork,
+    path = require('path');
 
-const checkShutdownCode = (code) => {
-    if (code === StatusFlag.ShutdownShouldRestart) {
-        platform.removeListener('shutdown', checkShutdownCode);
-        require.unrequire(translationsReq, __filename);
-        require.unrequire(platformReq, __filename);
-        exports.run();
-    }
-    else {
-        process.exit(0);
-    }
+global.StatusFlag = {
+    Unknown: 1,
+    NotStarted: 2,
+    Started: 3,
+    ShutdownShouldRestart: 4,
+    Shutdown: 0
 };
 
-exports.run = (startArgsP) => {
-    try {
-        if (!startArgs && startArgsP) {
-            startArgs = startArgsP;
-        }
-        global.$$ = require(translationsReq);
+class ConciergeProcess {
+    constructor (args, rootPath) {
+        this._exit = this._exit.bind(this);
+        this._args = args;
+        this._rootPath = rootPath;
+        this._start();
+    }
 
-        // quickest way to clone in JS, prevents reuse of same object between startups
-        const startClone = JSON.parse(JSON.stringify(startArgs)),
-            Platform = require(platformReq);
-        platform = new Platform();
-        platform.on('shutdown', checkShutdownCode);
-        platform.start(startClone);
+    _fixDebugArgs () {
+        const currArgs = process.execArgv;
+        for (let i = 0; i < currArgs.length; i++) {
+            if (/\=[0-9]{4}$/.test(currArgs[i])) {
+                const val = parseInt(currArgs[i].substr(currArgs[i].length - 4)) + 1;
+                currArgs[i] = currArgs[i].substring(0, currArgs[i].length - 4) + val;
+            }
+        }
+        return currArgs;
+    }
+
+    _start () {
+        process.env.__concierge_fork = this._rootPath;
+        this._process = fork(path.join(__dirname, 'startup.js'), this._args, {
+            cwd: process.cwd(),
+            env: process.env,
+            execArgv: this._fixDebugArgs(),
+            stdio: 'inherit'
+        });
+        this._process.on('exit', this._exit);
+    }
+
+    _criticalError (code, signal) {
+        console.error(`!CORE! critical error was unhandled (${code}, ${signal}). Please report this to developers.`);
+        process.exit(code);
+    }
+
+    _exit (code, signal) {
+        if (!code && !signal) {
+            code = 0;
+        }
+        switch (code) {
+        case global.StatusFlag.Shutdown:
+            process.exit(code);
+        case global.StatusFlag.ShutdownShouldRestart:
+            this._start();
+            break;
+        default:
+            this._criticalError(code, signal || 'NONE');
+        }
+    }
+}
+
+const start = (direct, rootPath) => {
+    require('./extensions.js')(rootPath, !!direct);
+    return require('./exports.js');
+};
+
+exports.run = (cli, args, rootPath) => cli ? new ConciergeProcess(args, rootPath) : start(false, rootPath);
+
+if (process.env.__concierge_fork) {
+    try {
+        const platform = start(true, process.env.__concierge_fork),
+            cli = require('./cli.js')(process.argv.slice(2));
+        return platform(cli);
     }
     catch (e) {
-        console.critical(e);
-        console.error('A critical error occurred while running. Please check your configuration or report a bug.');
-        process.exit(-3);
+        delete e.rawStackTrace;
+        console.error(e);
+        process.exit(global.currentPlatform ? global.currentPlatform.statusFlag : global.StatusFlag.Unknown);
     }
-};
-
-const stop = () => {
-    if (platform) {
-        platform.shutdown();
-    }
-    process.exit(0);
-};
-
-process.on('SIGHUP', () => {
-    console.warn('SIGHUP received. This has an unconditional 10 second terminate time which may not be enough to properly shutdown...');
-    stop();
-});
-
-process.on('SIGINT', () => {
-    stop();
-});
+}

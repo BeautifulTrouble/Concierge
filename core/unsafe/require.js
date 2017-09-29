@@ -9,7 +9,7 @@
  *
  * License:
  *        MIT License. All code unless otherwise specified is
- *        Copyright (c) Matthew Knox and Contributors 2016.
+ *        Copyright (c) Matthew Knox and Contributors 2017.
  */
 
 'use strict';
@@ -19,7 +19,10 @@ const npm = require(global.rootPathJoin('core/common/npm.js')),
     fs = require('fs'),
     nativeReloadHacksCache = {},
     nativeReloadHacks = ['deasync'],
-    npmDirectory = global.rootPathJoin('node_modules'),
+    npmFolder = 'node_modules',
+    npmDirectory = global.rootPathJoin(npmFolder),
+    npmLocalDirective = 'package.json',
+    coreDirectory = global.rootPathJoin('core'),
     nativeModules = Object.getOwnPropertyNames(process.binding('natives')),
     common = {},
     referenceCounts = {};
@@ -49,8 +52,9 @@ const getActualName = (mod) => common[mod] || mod;
  * Detect if a code module needs to be installed through NPM without using any internal node
  * require mechanisms. This needs to be done manually, because newer versions of node cache resolve/require
  * lookups, which means that after they have been installed they will not be detected by using require().
- * @param request the lookup to perform.
- * @param dirName relative directory to perform the lookup from.
+ * @param {string} request the lookup to perform.
+ * @param {string} dirName relative directory to perform the lookup from.
+ * @returns {boolean} if the module has already been installed.
  */
 const resolve = (request, dirName) => {
     if (nativeModules.includes(request)) {
@@ -64,12 +68,60 @@ const resolve = (request, dirName) => {
             return file && (file.isFile() || file.isDirectory());
         }
         else {
-            const dir = fs.statSync(path.join(npmDirectory, request));
-            return dir && dir.isDirectory();
+            const npmDirs = [];
+            const modName = global.moduleNameFromPath(dirName);
+            if (modName === null) {
+                npmDirs.push(path.join(dirName, npmFolder, request));
+            }
+            else {
+                npmDirs.push(path.join(global.__modulesPath, modName, npmFolder, request));
+            }
+            if (global.__runAsLocal || dirName.startsWith(coreDirectory)) {
+                npmDirs.push(path.join(npmDirectory, request));
+            }
+            if (global.__runAsRequired) {
+                npmDirs.push(path.join(global.__modulesPath, npmFolder, request));
+            }
+            for (let n of npmDirs) {
+                try {
+                    const dir = fs.statSync(n);
+                    if (dir && dir.isDirectory()) {
+                        return true;
+                    }
+                } catch (e2) {}
+            }
+            throw new Error();
         }
     }
     catch (e) {
         return parsed.dir.indexOf('.') === 0;
+    }
+};
+
+/**
+ * Determines if an NPM install should be performed in a modules directory.
+ * @param {string} dirName the directory of the module
+ * @param {string} name the name of the package that is being installed
+ * @returns {boolean} if NPM install should be run on the directory.
+ */
+const shouldInstallLocally = (dirName, name) => {
+    try {
+        if (!global.__runAsLocal) {
+            const mock = {
+                dependencies: {}
+            };
+            mock.dependencies[name] = '*';
+            return mock;
+        }
+        const p = path.join(dirName, npmLocalDirective),
+            d = fs.statSync(p);
+        if (dirName.startsWith(global.__modulesPath) && d.isFile()) {
+            return JSON.parse(fs.readFileSync(p));
+        }
+        return false;
+    }
+    catch (e) {
+        return false;
     }
 };
 
@@ -82,12 +134,20 @@ const resolve = (request, dirName) => {
 const installAndRequire = (req, name, dirName) => {
     const v = resolve(name, dirName);
     if (!v) {
+        const local = shouldInstallLocally(dirName, name);
+        let cwd = global.__rootPath,
+            npmName = name;
+        if (local) {
+            cwd = dirName;
+            const ver = local.dependencies[name] || local.devDependencies[name];
+            npmName = `${name}@${ver}`;
+        }
         const t = global.$$, // translations might not have loaded
-            startStr = t ? t`Installing "${name}" from npm.` : `Installing "${name}" from npm.`,
+            startStr = t ? t`Installing "${npmName}" from npm.` : `Installing "${npmName}" from npm.`,
             endStr = t ? t`Installation complete.` : 'Installation complete.';
 
         console.info(startStr);
-        npm.install([name]);
+        npm.installSync([npmName], cwd);
         console.info(endStr);
     }
     else if (nativeReloadHacksCache.hasOwnProperty(name)) {
@@ -124,7 +184,7 @@ module.exports = (req, dirName, fileName) => {
         const res = installAndRequire(req, mod, dirName),
             p = req.resolve(mod),
             refName = global.moduleNameFromPath(p) || p;
-        if (!p.startsWith(npmDirectory) && !nativeModules.includes(mod)) {
+        if (!p.contains(npmDirectory) && !nativeModules.includes(mod)) {
             if (!referenceCounts.hasOwnProperty(refName)) {
                 referenceCounts[refName] = {
                     self: [],
@@ -151,17 +211,43 @@ module.exports = (req, dirName, fileName) => {
         func[key] = req[key];
     }
 
+    func.forcePackageInstall = async(dir) => {
+        const locally = shouldInstallLocally(dir);
+        let stat = null;
+        try {
+            stat = fs.statSync(path.join(dir, npmFolder));
+        }
+        catch (e) {}
+        try {
+            if (global.__runAsLocal && !stat && locally && Object.keys(locally.dependencies).length > 0) {
+                await npm.install(Object.keys(locally.dependencies).map(d => `${d}@${locally.dependencies[d]}`), dir);
+            }
+        }
+        catch (e) {} // ignoring is an ugly solution, but this code *must not fail*
+    };
+
     func.searchCache = (moduleName, callback) => {
         moduleName = getActualName(moduleName);
         let mod = func.resolve(moduleName);
         if (mod && (typeof (mod = func.cache[mod]) !== 'undefined')) {
+            let ran_children = [];
             const run = (m) => {
-                m.children.forEach((child) => {
-                    run(child);
-                });
+                if (m.children !== null) {
+                    m.children.forEach((child) => {
+                        if (!child.hasRun) {
+                            child.hasRun = true;
+                            ran_children.push(child);
+                            run(child);
+                        }
+                    });
+                }
                 callback(mod);
             };
             run(mod);
+
+            for (let child of ran_children) {
+                delete child.hasRun;
+            }
         }
     };
 
@@ -185,6 +271,7 @@ module.exports = (req, dirName, fileName) => {
             refs = referenceCounts[curr].refs,
             ind = refs.indexOf(mod);
         if (ind < 0) {
+            LOG.silly(`mod: ${mod}\ncontext: ${context}\ncurr: ${curr}\nrefs: ${refs}`);
             throw new Error('You never required that!');
         }
         refs.splice(ind, 1);

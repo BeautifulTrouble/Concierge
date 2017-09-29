@@ -9,9 +9,9 @@
  *		Copyright (c) Matthew Knox and Contributors 2016.
  */
 
-const fs              = require('fs'),
-    path            = require('path'),
-    descriptor      = 'kassy.json';
+const files = require('concierge/files'),
+    path = require('path'),
+    descriptor = 'kassy.json';
 
 const moduleTypeFunctions = {
     'module': ['run', 'match'],
@@ -19,41 +19,28 @@ const moduleTypeFunctions = {
     'integration': ['start', 'stop', 'getApi']
 };
 
-exports.verifyModule = (location) => {
-    let stat = fs.statSync(location);
-    if (!stat.isDirectory()) {
-        return null;
-    }
-
+exports.verifyModule = async(location) => {
     const folderPath = path.resolve(location),
         p = path.join(folderPath, `./${descriptor}`);
-    try {
-        stat = fs.statSync(p);
-        if (!stat) {
-            return null;
-        }
-    }
-    catch (e) {
+
+    if ((await files.fileExists(p)) !== 'file') {
         return null;
     }
 
-    const kj = require(p);
-    if (!(kj.name && kj.startup && kj.version)) {
+    const kj = await files.readJson(p);
+    if (!(kj.name && kj.startup && kj.version !== void(0) && kj.version != null)) {
         return null;
     }
 
-    if (!kj.folderPath) {
-        kj.folderPath = folderPath;
-    }
+    kj.folderPath = folderPath;
 
     if (!kj.type) {
         kj.type = 'module';
     }
-
     return kj;
 };
 
-exports.loadModule = (module) => {
+exports.loadModule = module => {
     const modulePath = module.folderPath;
     let startPath   = module.startup,
         m;
@@ -87,11 +74,13 @@ exports.loadModule = (module) => {
                 module.type = [module.type];
             }
 
-            if (!module.type.every(t => types.includes(t))) {
+            if (!module.type.every(t => types.includes(t) || t === 'system')) {
                 throw new Error($$`Module is not one of the defined module types.`);
             }
         }
-        module.type = types;
+        else {
+            module.type = types;
+        }
     }
     catch (e) {
         console.critical(e);

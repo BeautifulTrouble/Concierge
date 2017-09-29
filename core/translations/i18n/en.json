@@ -29,13 +29,12 @@
   "Invalid integration installed (syntax error?).": "Invalid integration installed (syntax error?).",
   "Invalid translation context provided.": "Invalid translation context provided.",
   "Loading integration '${0}'...\t": "Loading integration '${0}'...\t",
-  "Loading module '${0}'... ${1}": "Loading module '${0}'... ${1}",
+  "Loading module '${0}'": "Loading module '${0}'",
   "Loading Succeeded": "Loading Succeeded",
   "Loading the output integration file '${0}' failed.\n\n": "Loading the output integration file '${0}' failed.\n\n",
   "LoadingModules": "Loading modules...",
   "LoadingSystemConfig": "Loading system configuration...",
   "Module \"${0}\" could not be loaded.": "Module \"${0}\" could not be loaded.",
-  "No or invalid configuration file found at \"${0}\".": "No or invalid configuration file found at \"${0}\".",
   "Not enough information provided to describe integration.": "Not enough information provided to describe integration.",
   "ShutdownError": "Cannot shutdown platform when it is not started.",
   "Skipping \"${0}\". It isn't a Hubot module.": "Skipping \"${0}\". It isn't a Hubot module.",
@@ -49,9 +48,5 @@
   "Unloading module \"${0}\".": "Unloading module \"${0}\".",
   "What kind of shit platform is this that doesn't even support sending messages?": "What kind of shit platform is this that doesn't even support sending messages?",
   "Working on it...": "Working on it...",
-  "Attempting to install module from \"${0}\"": "Attempting to install module from \"${0}\"...",
-  "Failed to install module from \"${0}\"": "Failed to install module from \"${0}\"...",
-  "\"${0}\" (${1}) is now installed.":"\"${0}\" (${1}) is now installed.",
-  "Discord is ready":"Discord is ready",
-  "A token must be provided":"A token must be provided"
+  "Title ${0} ${1}": "\n${0}\n ${1}\n------------------------------------"
 }

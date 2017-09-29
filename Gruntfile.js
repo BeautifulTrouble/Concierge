@@ -1,22 +1,27 @@
-module.exports = function (grunt) {
+'use strict';
 
-    // install the grunt integration if it does not exist
-    const fs = require('fs');
-    try {
-        const stats = fs.lstatSync('./modules/grunt');
-        if (!stats.isDirectory()) {
-            throw new Error('Grunt is not installed.');
-        }
+const startConciergeTask = done => {
+    // allow use of already running Concierge instance
+    if (global.currentPlatform) {
+        return done();
     }
-    catch (e) {
-        const git = require('./core/common/git.js');
-        git.clone('https://github.com/concierge/grunt.git', './modules/grunt', (err) => {
-            if (err) {
-                throw new Error('Could not install required testing code.');
-            }
-        });
-    }
+    process.env.CLONE_TRY_UPSTREAM = '1';
+    const concierge = require('./main.js');
+    const promise = concierge({
+        modules: './modules',
+        locale: 'en',
+        debug: 'silly',
+        timestamp: false,
+        loopback: false
+    });
+    promise.then(platform => {
+        platform.removeAllListeners('shutdown');
+        platform.once('started', done);
+    });
+};
 
+module.exports = grunt => {
+    grunt.option('stack', true);
     grunt.initConfig({
         pkg: grunt.file.readJSON('package.json'),
         mochaTest: {
@@ -28,7 +33,7 @@ module.exports = function (grunt) {
                 recursive: true,
                 dely: true
             },
-            src: ['test/acceptance/*.js', 'test/unit/*.js']
+            src: ['test/acceptance/*.js', 'test/unit/**/*.js', 'modules/**/test/acceptance/*.js', 'modules/**/test/unit/**/*.js', '!modules/test/**/*.js']
         },
         watch: {
             test: {
@@ -40,32 +45,26 @@ module.exports = function (grunt) {
                 tasks: ['mochacli:nyan']
             },
             all: {
-                files: ['core/**/*.js', 'core/**/*.coffee', 'test/**/*.js'],
+                files: ['core/**/*.js', 'core/**/*.coffee', 'test/**/*.js', 'modules/**/*.js'],
                 tasks: ['mochacli:spec']
-            }
-        },
-        run: {
-            options: {
-                wait: false,
-                ready: /.*System has started\. Hello World!.*/ig
-            },
-            concierge: {
-                cmd: 'node',
-                args: [
-                    'main.js',
-                    '--debug',
-                    'grunt'
-                ]
             }
         }
     });
     grunt.loadNpmTasks('grunt-mocha-test');
     grunt.loadNpmTasks('grunt-contrib-watch');
-    grunt.loadNpmTasks('grunt-run');
 
-    grunt.registerTask('wall', ['run:concierge', 'watch:all']);
-    grunt.registerTask('wcore', ['run:concierge', 'watch:core']);
-    grunt.registerTask('wtest', ['run:concierge', 'watch:test']);
-    grunt.registerTask('test', ['run:concierge', 'mochaTest']);
-    grunt.registerTask('default', ['run:concierge', 'watch:core']);
+    grunt.registerTask('init', function() {
+        const done = this.async();
+        startConciergeTask(() => {
+            global.c_require = p => require(require('path').join(__dirname, p));
+            global.MockApi = require('./test/helpers/MockApi.js');
+            done();
+        });
+    });
+
+    grunt.registerTask('wall', ['init', 'watch:all']);
+    grunt.registerTask('wcore', ['init', 'watch:core']);
+    grunt.registerTask('wtest', ['init', 'watch:test']);
+    grunt.registerTask('test', ['init', 'mochaTest']);
+    grunt.registerTask('default', ['init', 'mochaTest']);
 };
